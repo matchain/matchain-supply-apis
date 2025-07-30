@@ -15,7 +15,7 @@ pub fn read_pool_addresses() -> Vec<Address> {
     serde_json::from_str(&content).expect("Failed to parse pool address list")
 }
 
-pub fn warn_about_duplicate_addresses() {
+pub fn validate_address_lists() -> Result<(), String> {
     let excluded_addresses = read_excluded_addresses();
     let pool_addresses = read_pool_addresses();
     
@@ -28,23 +28,18 @@ pub fn warn_about_duplicate_addresses() {
     }
     
     if !duplicates.is_empty() {
-        eprintln!("\n⚠️  WARNING ⚠️");
-        eprintln!("\n🔍 Found {} pool address(es) in the excluded addresses list:", duplicates.len());
-        eprintln!();
-        for addr in &duplicates {
-            eprintln!("   • {}", addr);
-        }
-        eprintln!();
-        eprintln!("📋 IMPACT:");
-        eprintln!("   • These pools will be EXCLUDED from both exclusion and vesting calculations");
-        eprintln!("   • Their balances will be subtracted from total supply");
-        eprintln!("   • Their locked amounts will NOT be calculated separately");
-        eprintln!("   • This prevents double counting but may affect accuracy");
-        eprintln!();
-        eprintln!("💡 RECOMMENDATION:");
-        eprintln!("   • If you want vesting calculations for these pools, remove them from excluded list");
-        eprintln!("   • If you want to exclude them entirely, this configuration is correct");
-        eprintln!("   • Current behavior: Pools in excluded list are skipped from vesting calculations");
-        eprintln!();
+        return Err(format!(
+            "\n❌ CONFIGURATION ERROR ❌\n\n\
+            🚫 Pool addresses found in excluded addresses list!\n\n\
+            This would cause double counting in supply calculations.\n\n\
+            🔧 TO FIX:\n\
+            Remove these addresses from 'config/excluded_address_list.json':\n\n\
+            {}\n\n\
+            💡 TIP: Pool addresses should only be in 'config/pool_address_list.json', \
+            not in the excluded list since they are handled separately in the vesting calculations.\n",
+            duplicates.join("\n")
+        ));
     }
+    
+    Ok(())
 }

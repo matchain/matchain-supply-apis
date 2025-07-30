@@ -205,29 +205,18 @@ pub async fn get_circulating_supply(
 
     let current_block = contract.client().get_block_number().await?;
 
-    // Filter out pools that are in the excluded list to avoid double counting
-    let mut locked_balance = U256::zero();
-    for (i, pool_addr) in pool_addresses.iter().enumerate() {
-        // Skip this pool if it's in the excluded addresses list
-        if excluded_addresses.contains(pool_addr) {
-            continue;
-        }
-        
-        // Calculate locked amount for this pool
-        if i < parsed.pool_data.len() {
-            let data = &parsed.pool_data[i];
-            let calc = calculate_pool_vesting(
-                data.initial,
-                data.pool_creation,
-                data.blocks_per_day,
-                data.lock_days,
-                data.vesting_days,
-                data.ratio_precision,
-                current_block,
-            );
-            locked_balance = locked_balance + calc.locked_amount;
-        }
-    }
+    let locked_balance = parsed.pool_data.iter().fold(U256::zero(), |acc, data| {
+        let calc = calculate_pool_vesting(
+            data.initial,
+            data.pool_creation,
+            data.blocks_per_day,
+            data.lock_days,
+            data.vesting_days,
+            data.ratio_precision,
+            current_block,
+        );
+        acc + calc.locked_amount
+    });
 
     // Safe arithmetic operations to prevent overflow
     let mut value = parsed.total_supply;
