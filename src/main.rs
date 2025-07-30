@@ -22,6 +22,9 @@ struct AppState {
 async fn main() -> AnyhowResult<()> {
     dotenv().ok();
 
+    // Show warnings about duplicate addresses (but don't stop the server)
+    config::warn_about_duplicate_addresses();
+
     let rpc_url = env::var("RPC_URL")?;
     let provider = Arc::new(Provider::<Http>::try_from(rpc_url)?);
 

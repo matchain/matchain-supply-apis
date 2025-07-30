@@ -43,28 +43,71 @@ pub fn calculate_pool_vesting(
     ratio_precision: U256,
     current_block: U64,
 ) -> PoolCalculation {
-    let blocks_passed = U256::from(current_block.as_u64()) - pool_creation;
-    let days_passed = if blocks_per_day > U256::zero() { blocks_passed / blocks_per_day } else { U256::zero() };
-    let lock_days_converted = if blocks_per_day > U256::zero() { lock_days / blocks_per_day } else { U256::zero() };
-    let vesting_days_converted = if blocks_per_day > U256::zero() { vesting_days / blocks_per_day } else { U256::zero() };
+    // Safe arithmetic operations with overflow checks
+    let current_block_u256 = U256::from(current_block.as_u64());
+    
+    // Check if current_block is greater than pool_creation to avoid underflow
+    let blocks_passed = if current_block_u256 > pool_creation {
+        current_block_u256 - pool_creation
+    } else {
+        U256::zero()
+    };
+    
+    // Safe division with zero check
+    let days_passed = if blocks_per_day > U256::zero() {
+        blocks_passed / blocks_per_day
+    } else {
+        U256::zero()
+    };
+    
+    let lock_days_converted = if blocks_per_day > U256::zero() {
+        lock_days / blocks_per_day
+    } else {
+        U256::zero()
+    };
+    
+    let vesting_days_converted = if blocks_per_day > U256::zero() {
+        vesting_days / blocks_per_day
+    } else {
+        U256::zero()
+    };
+    
     let days_until_lock_ends = if days_passed < lock_days_converted {
         lock_days_converted - days_passed
     } else {
         U256::zero()
     };
-    let days_until_vesting_ends = if days_passed < (lock_days_converted + vesting_days_converted) {
-        (lock_days_converted + vesting_days_converted) - days_passed
+    
+    let total_vesting_period = lock_days_converted + vesting_days_converted;
+    let days_until_vesting_ends = if days_passed < total_vesting_period {
+        total_vesting_period - days_passed
     } else {
         U256::zero()
     };
+    
     let unlocked_fraction = if days_passed <= lock_days_converted {
         U256::zero()
-    } else {
-        let frac = ((days_passed - lock_days_converted) * ratio_precision) / vesting_days_converted;
+    } else if vesting_days_converted > U256::zero() {
+        let vesting_progress = days_passed - lock_days_converted;
+        let frac = (vesting_progress * ratio_precision) / vesting_days_converted;
         cmp::min(frac, ratio_precision)
+    } else {
+        U256::zero()
     };
-    let unlocked = (initial * unlocked_fraction) / ratio_precision;
-    let locked = initial - unlocked;
+    
+    // Safe multiplication and division
+    let unlocked = if ratio_precision > U256::zero() {
+        (initial * unlocked_fraction) / ratio_precision
+    } else {
+        U256::zero()
+    };
+    
+    let locked = if unlocked < initial {
+        initial - unlocked
+    } else {
+        U256::zero()
+    };
+    
     PoolCalculation {
         initial,
         ratio_precision,
@@ -137,7 +180,14 @@ pub async fn get_total_supply(contract: &ERC20<impl Middleware + 'static>, decim
     let multicall = build_multicall(contract, &[], &[]).await;
     let results: Vec<U256> = multicall.call_array().await?;
     let parsed = parse_multicall_results(results, 0, 0);
-    let value = parsed.total_supply - parsed.burn_balance;
+    
+    // Safe subtraction to prevent underflow
+    let value = if parsed.burn_balance < parsed.total_supply {
+        parsed.total_supply - parsed.burn_balance
+    } else {
+        U256::zero()
+    };
+    
     Ok(utils::u256_to_human(value, decimals))
 }
 
@@ -155,19 +205,53 @@ pub async fn get_circulating_supply(
 
     let current_block = contract.client().get_block_number().await?;
 
-    let locked_balance = parsed.pool_data.iter().fold(U256::zero(), |acc, data| {
-        let calc = calculate_pool_vesting(
-            data.initial,
-            data.pool_creation,
-            data.blocks_per_day,
-            data.lock_days,
-            data.vesting_days,
-            data.ratio_precision,
-            current_block,
-        );
-        acc + calc.locked_amount
-    });
+    // Filter out pools that are in the excluded list to avoid double counting
+    let mut locked_balance = U256::zero();
+    for (i, pool_addr) in pool_addresses.iter().enumerate() {
+        // Skip this pool if it's in the excluded addresses list
+        if excluded_addresses.contains(pool_addr) {
+            continue;
+        }
+        
+        // Calculate locked amount for this pool
+        if i < parsed.pool_data.len() {
+            let data = &parsed.pool_data[i];
+            let calc = calculate_pool_vesting(
+                data.initial,
+                data.pool_creation,
+                data.blocks_per_day,
+                data.lock_days,
+                data.vesting_days,
+                data.ratio_precision,
+                current_block,
+            );
+            locked_balance = locked_balance + calc.locked_amount;
+        }
+    }
 
-    let value = parsed.total_supply - excluded_balance - locked_balance - parsed.burn_balance;
+    // Safe arithmetic operations to prevent overflow
+    let mut value = parsed.total_supply;
+    
+    // Subtract excluded balance safely
+    if excluded_balance < value {
+        value = value - excluded_balance;
+    } else {
+        value = U256::zero();
+    }
+    
+    // Subtract locked balance safely
+    if locked_balance < value {
+        value = value - locked_balance;
+    } else {
+        value = U256::zero();
+    }
+    
+    // Subtract burn balance safely
+    if parsed.burn_balance < value {
+        value = value - parsed.burn_balance;
+    } else {
+        value = U256::zero();
+    }
+    
     Ok(utils::u256_to_human(value, decimals))
 }
