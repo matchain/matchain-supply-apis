@@ -1,14 +1,14 @@
 // src/main.rs
-use axum::{extract::State, response::Json, routing::get, Router};
+use anyhow::Result as AnyhowResult;
+use axum::{Router, extract::State, response::Json, routing::get};
 use dotenvy::dotenv;
 use ethers::providers::{Http, Provider};
 use ethers::types::Address;
-use matchain_supply_apis::{config, supply, ERC20};
+use matchain_supply_apis::{ERC20, config, supply};
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use anyhow::Result as AnyhowResult;
 
 #[derive(Clone)]
 struct AppState {
@@ -72,7 +72,9 @@ async fn circulating_supply(State(state): State<Arc<AppState>>) -> Json<String> 
         &state.excluded_addresses,
         &state.pool_addresses,
         state.decimals,
-    ).await {
+    )
+    .await
+    {
         Ok(value) => Json(value),
         Err(_) => Json("Error calculating circulating supply".to_string()),
     }

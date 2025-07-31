@@ -3,11 +3,14 @@
 
 use ethers::contract::abigen;
 
-abigen!(ERC20, r#"[
+abigen!(
+    ERC20,
+    r#"[
     function totalSupply() external view returns (uint256)
     function balanceOf(address) external view returns (uint256)
     function decimals() external view returns (uint8)
-]"#);
+]"#
+);
 
 abigen!(StakingPool, "abi/staking_pool_abi.json");
 
