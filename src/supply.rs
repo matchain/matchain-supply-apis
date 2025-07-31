@@ -2,7 +2,7 @@
 use crate::{ERC20, StakingPool, utils};
 use ethers::contract::Multicall;
 use ethers::providers::Middleware;
-use ethers::types::{Address, U256, U64};
+use ethers::types::{Address, U64, U256};
 use std::cmp;
 
 #[derive(Debug, Clone)]
@@ -45,46 +45,46 @@ pub fn calculate_pool_vesting(
 ) -> PoolCalculation {
     // Safe arithmetic operations with overflow checks
     let current_block_u256 = U256::from(current_block.as_u64());
-    
+
     // Check if current_block is greater than pool_creation to avoid underflow
     let blocks_passed = if current_block_u256 > pool_creation {
         current_block_u256 - pool_creation
     } else {
         U256::zero()
     };
-    
+
     // Safe division with zero check
     let days_passed = if blocks_per_day > U256::zero() {
         blocks_passed / blocks_per_day
     } else {
         U256::zero()
     };
-    
+
     let lock_days_converted = if blocks_per_day > U256::zero() {
         lock_days / blocks_per_day
     } else {
         U256::zero()
     };
-    
+
     let vesting_days_converted = if blocks_per_day > U256::zero() {
         vesting_days / blocks_per_day
     } else {
         U256::zero()
     };
-    
+
     let days_until_lock_ends = if days_passed < lock_days_converted {
         lock_days_converted - days_passed
     } else {
         U256::zero()
     };
-    
+
     let total_vesting_period = lock_days_converted + vesting_days_converted;
     let days_until_vesting_ends = if days_passed < total_vesting_period {
         total_vesting_period - days_passed
     } else {
         U256::zero()
     };
-    
+
     let unlocked_fraction = if days_passed <= lock_days_converted {
         U256::zero()
     } else if vesting_days_converted > U256::zero() {
@@ -94,20 +94,20 @@ pub fn calculate_pool_vesting(
     } else {
         U256::zero()
     };
-    
+
     // Safe multiplication and division
     let unlocked = if ratio_precision > U256::zero() {
         (initial * unlocked_fraction) / ratio_precision
     } else {
         U256::zero()
     };
-    
+
     let locked = if unlocked < initial {
         initial - unlocked
     } else {
         U256::zero()
     };
-    
+
     PoolCalculation {
         initial,
         ratio_precision,
@@ -124,8 +124,12 @@ async fn build_multicall(
     excluded_addresses: &[Address],
     pool_addresses: &[Address],
 ) -> Multicall<impl Middleware + 'static> {
-    let multicall_addr: Address = "0xcA11bde05977b3631167028862bE2a173976CA11".parse().expect("Invalid multicall address");
-    let mut multicall = Multicall::new(contract.client().clone(), Some(multicall_addr)).await.expect("Multicall creation failed");
+    let multicall_addr: Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
+        .parse()
+        .expect("Invalid multicall address");
+    let mut multicall = Multicall::new(contract.client().clone(), Some(multicall_addr))
+        .await
+        .expect("Multicall creation failed");
 
     multicall.add_call(contract.total_supply(), false);
     multicall.add_call(contract.balance_of(Address::zero()), false);
@@ -157,16 +161,20 @@ fn parse_multicall_results(
     let total_supply = iter.next().expect("Missing total supply");
     let burn_balance = iter.next().expect("Missing burn balance");
 
-    let excluded_balances: Vec<U256> = (0..excluded_len).map(|_| iter.next().expect("Missing excluded balance")).collect();
+    let excluded_balances: Vec<U256> = (0..excluded_len)
+        .map(|_| iter.next().expect("Missing excluded balance"))
+        .collect();
 
-    let pool_data: Vec<PoolData> = (0..pool_len).map(|_| PoolData {
-        initial: iter.next().expect("Missing initial"),
-        pool_creation: iter.next().expect("Missing pool creation"),
-        blocks_per_day: iter.next().expect("Missing blocks per day"),
-        lock_days: iter.next().expect("Missing lock days"),
-        vesting_days: iter.next().expect("Missing vesting days"),
-        ratio_precision: iter.next().expect("Missing ratio precision"),
-    }).collect();
+    let pool_data: Vec<PoolData> = (0..pool_len)
+        .map(|_| PoolData {
+            initial: iter.next().expect("Missing initial"),
+            pool_creation: iter.next().expect("Missing pool creation"),
+            blocks_per_day: iter.next().expect("Missing blocks per day"),
+            lock_days: iter.next().expect("Missing lock days"),
+            vesting_days: iter.next().expect("Missing vesting days"),
+            ratio_precision: iter.next().expect("Missing ratio precision"),
+        })
+        .collect();
 
     MulticallResults {
         total_supply,
@@ -176,18 +184,21 @@ fn parse_multicall_results(
     }
 }
 
-pub async fn get_total_supply(contract: &ERC20<impl Middleware + 'static>, decimals: u8) -> Result<String, anyhow::Error> {
+pub async fn get_total_supply(
+    contract: &ERC20<impl Middleware + 'static>,
+    decimals: u8,
+) -> Result<String, anyhow::Error> {
     let multicall = build_multicall(contract, &[], &[]).await;
     let results: Vec<U256> = multicall.call_array().await?;
     let parsed = parse_multicall_results(results, 0, 0);
-    
+
     // Safe subtraction to prevent underflow
     let value = if parsed.burn_balance < parsed.total_supply {
         parsed.total_supply - parsed.burn_balance
     } else {
         U256::zero()
     };
-    
+
     Ok(utils::u256_to_human(value, decimals))
 }
 
@@ -201,7 +212,10 @@ pub async fn get_circulating_supply(
     let results: Vec<U256> = multicall.call_array().await?;
     let parsed = parse_multicall_results(results, excluded_addresses.len(), pool_addresses.len());
 
-    let excluded_balance = parsed.excluded_balances.iter().fold(U256::zero(), |acc, &b| acc + b);
+    let excluded_balance = parsed
+        .excluded_balances
+        .iter()
+        .fold(U256::zero(), |acc, &b| acc + b);
 
     let current_block = contract.client().get_block_number().await?;
 
@@ -220,27 +234,27 @@ pub async fn get_circulating_supply(
 
     // Safe arithmetic operations to prevent overflow
     let mut value = parsed.total_supply;
-    
+
     // Subtract excluded balance safely
     if excluded_balance < value {
         value = value - excluded_balance;
     } else {
         value = U256::zero();
     }
-    
+
     // Subtract locked balance safely
     if locked_balance < value {
         value = value - locked_balance;
     } else {
         value = U256::zero();
     }
-    
+
     // Subtract burn balance safely
     if parsed.burn_balance < value {
         value = value - parsed.burn_balance;
     } else {
         value = U256::zero();
     }
-    
+
     Ok(utils::u256_to_human(value, decimals))
 }

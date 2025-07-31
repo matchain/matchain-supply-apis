@@ -1,32 +1,29 @@
 // src/config.rs
 use ethers::types::Address;
 use serde_json;
-use std::fs;
 
 pub fn read_excluded_addresses() -> Vec<Address> {
-    let content = fs::read_to_string("config/excluded_address_list.json")
-        .expect("Failed to read excluded address list");
+    let content = include_str!("../config/excluded_address_list.json");
     serde_json::from_str(&content).expect("Failed to parse excluded address list")
 }
 
 pub fn read_pool_addresses() -> Vec<Address> {
-    let content = fs::read_to_string("config/pool_address_list.json")
-        .expect("Failed to read pool address list");
+    let content = include_str!("../config/pool_address_list.json");
     serde_json::from_str(&content).expect("Failed to parse pool address list")
 }
 
 pub fn validate_address_lists() -> Result<(), String> {
     let excluded_addresses = read_excluded_addresses();
     let pool_addresses = read_pool_addresses();
-    
+
     let mut duplicates = Vec::new();
-    
+
     for pool_addr in &pool_addresses {
         if excluded_addresses.contains(pool_addr) {
             duplicates.push(format!("0x{:x}", pool_addr));
         }
     }
-    
+
     if !duplicates.is_empty() {
         return Err(format!(
             "\n❌ CONFIGURATION ERROR ❌\n\n\
@@ -40,6 +37,6 @@ pub fn validate_address_lists() -> Result<(), String> {
             duplicates.join("\n")
         ));
     }
-    
+
     Ok(())
 }
