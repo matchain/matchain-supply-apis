@@ -1,6 +1,6 @@
-// src/main.rs
+
 use anyhow::Result as AnyhowResult;
-use axum::{Router, extract::State, response::Json, routing::get};
+use axum::{Router, extract::State, response::Response, routing::get, body::Body};
 use dotenvy::dotenv;
 use ethers::providers::{Http, Provider};
 use ethers::types::Address;
@@ -59,14 +59,20 @@ async fn main() -> AnyhowResult<()> {
     Ok(())
 }
 
-async fn total_supply(State(state): State<Arc<AppState>>) -> Json<String> {
+async fn total_supply(State(state): State<Arc<AppState>>) -> Response {
     match supply::get_total_supply(&state.contract, state.decimals).await {
-        Ok(value) => Json(value),
-        Err(_) => Json("Error calculating total supply".to_string()),
+        Ok(value) => Response::builder()
+            .header("Content-Type", "text/plain")
+            .body(Body::from(value))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .header("Content-Type", "text/plain")
+            .body(Body::from("Error calculating total supply".to_string()))
+            .unwrap(),
     }
 }
 
-async fn circulating_supply(State(state): State<Arc<AppState>>) -> Json<String> {
+async fn circulating_supply(State(state): State<Arc<AppState>>) -> Response {
     match supply::get_circulating_supply(
         &state.contract,
         &state.excluded_addresses,
@@ -75,7 +81,13 @@ async fn circulating_supply(State(state): State<Arc<AppState>>) -> Json<String> 
     )
     .await
     {
-        Ok(value) => Json(value),
-        Err(_) => Json("Error calculating circulating supply".to_string()),
+        Ok(value) => Response::builder()
+            .header("Content-Type", "text/plain")
+            .body(Body::from(value))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .header("Content-Type", "text/plain")
+            .body(Body::from("Error calculating circulating supply".to_string()))
+            .unwrap(),
     }
 }
