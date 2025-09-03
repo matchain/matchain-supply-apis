@@ -1,8 +1,7 @@
-// src/supply.rs
 use crate::{ERC20, StakingPool, utils};
 use ethers::contract::Multicall;
 use ethers::providers::Middleware;
-use ethers::types::{Address, U64, U256};
+use ethers::types::{Address, U256};
 use std::cmp;
 
 #[derive(Debug, Clone)]
@@ -16,97 +15,77 @@ pub struct PoolCalculation {
     pub unlocked_fraction: U256,
 }
 
-#[derive(Debug, Clone)]
-struct MulticallResults {
-    total_supply: U256,
-    burn_balance: U256,
-    excluded_balances: Vec<U256>,
-    pool_data: Vec<PoolData>,
-}
-
-#[derive(Debug, Clone)]
-struct PoolData {
-    initial: U256,
-    pool_creation: U256,
-    blocks_per_day: U256,
-    lock_days: U256,
-    vesting_days: U256,
-    ratio_precision: U256,
-}
-
 pub fn calculate_pool_vesting(
     initial: U256,
-    pool_creation: U256,
-    blocks_per_day: U256,
-    lock_days: U256,
-    vesting_days: U256,
+    tge_percentage: U256,
+    cliff: U256,
+    vesting: U256,
     ratio_precision: U256,
-    current_block: U64,
+    current_ts: U256,
+    tge_ts: U256,
+    vesting_type: &str,
 ) -> PoolCalculation {
-    // Safe arithmetic operations with overflow checks
-    let current_block_u256 = U256::from(current_block.as_u64());
+    // Bounds checking
+    if initial > U256::from(10u128.pow(27)) || cliff > U256::from(2190) || vesting > U256::from(2190) || ratio_precision < U256::from(1000) || ratio_precision > U256::from(10u128.pow(16)) {
+        eprintln!("Invalid vesting parameters: initial={}, cliff={}, vesting={}, ratio_precision={}", initial, cliff, vesting, ratio_precision);
+        return PoolCalculation {
+            initial,
+            ratio_precision,
+            locked_amount: U256::zero(),
+            days_passed: U256::zero(),
+            days_until_lock_ends: U256::zero(),
+            days_until_vesting_ends: U256::zero(),
+            unlocked_fraction: U256::zero(),
+        };
+    }
 
-    // Check if current_block is greater than pool_creation to avoid underflow
-    let blocks_passed = if current_block_u256 > pool_creation {
-        current_block_u256 - pool_creation
+    let seconds_passed = current_ts.checked_sub(tge_ts).unwrap_or(U256::zero());
+    let days_passed = seconds_passed / U256::from(86400u64);
+
+    let days_until_lock_ends = cliff.checked_sub(days_passed).unwrap_or(U256::zero());
+
+    let total_vesting_period = cliff.checked_add(vesting).unwrap_or(cliff);
+    let days_until_vesting_ends = total_vesting_period.checked_sub(days_passed).unwrap_or(U256::zero());
+
+    let unlocked_fraction = if vesting_type == "stepped" {
+        if days_passed < cliff {
+            tge_percentage * (ratio_precision / U256::from(100u64))
+        } else {
+            let periods_passed = (days_passed.checked_sub(cliff).unwrap_or(U256::zero())) / U256::from(90);
+            let periods = cmp::min(periods_passed, U256::from(6));
+            let step_percentage = U256::from(166700);
+            let tge_scaled = tge_percentage * (ratio_precision / U256::from(100u64));
+            let mut remaining = ratio_precision.checked_sub(tge_scaled).unwrap_or(U256::zero());
+            let mut unlocked = tge_scaled;
+            for _ in 0..periods.as_u64() {
+                let release = (remaining * step_percentage) / ratio_precision;
+                unlocked = unlocked.checked_add(release).unwrap_or(unlocked);
+                remaining = remaining.checked_sub(release).unwrap_or(remaining);
+            }
+            cmp::min(unlocked, ratio_precision)
+        }
     } else {
-        U256::zero()
+        // Linear vesting
+        if days_passed < cliff {
+            tge_percentage * (ratio_precision / U256::from(100u64))
+        } else if vesting > U256::zero() {
+            let vesting_progress = days_passed.checked_sub(cliff).unwrap_or(U256::zero());
+            let frac = (vesting_progress.checked_mul(ratio_precision).unwrap_or(U256::zero()) / vesting)
+                .checked_add(tge_percentage * (ratio_precision / U256::from(100u64)))
+                .unwrap_or(tge_percentage * (ratio_precision / U256::from(100u64)));
+            cmp::min(frac, ratio_precision)
+        } else {
+            tge_percentage * (ratio_precision / U256::from(100u64))
+        }
     };
 
-    // Safe division with zero check
-    let days_passed = if blocks_per_day > U256::zero() {
-        blocks_passed / blocks_per_day
-    } else {
-        U256::zero()
-    };
-
-    let lock_days_converted = if blocks_per_day > U256::zero() {
-        lock_days / blocks_per_day
-    } else {
-        U256::zero()
-    };
-
-    let vesting_days_converted = if blocks_per_day > U256::zero() {
-        vesting_days / blocks_per_day
-    } else {
-        U256::zero()
-    };
-
-    let days_until_lock_ends = if days_passed < lock_days_converted {
-        lock_days_converted - days_passed
-    } else {
-        U256::zero()
-    };
-
-    let total_vesting_period = lock_days_converted + vesting_days_converted;
-    let days_until_vesting_ends = if days_passed < total_vesting_period {
-        total_vesting_period - days_passed
-    } else {
-        U256::zero()
-    };
-
-    let unlocked_fraction = if days_passed <= lock_days_converted {
-        U256::zero()
-    } else if vesting_days_converted > U256::zero() {
-        let vesting_progress = days_passed - lock_days_converted;
-        let frac = (vesting_progress * ratio_precision) / vesting_days_converted;
-        cmp::min(frac, ratio_precision)
-    } else {
-        U256::zero()
-    };
-
-    // Safe multiplication and division
     let unlocked = if ratio_precision > U256::zero() {
         (initial * unlocked_fraction) / ratio_precision
     } else {
         U256::zero()
     };
 
-    let locked = if unlocked < initial {
-        initial - unlocked
-    } else {
-        U256::zero()
-    };
+    let locked = initial.checked_sub(unlocked).unwrap_or(U256::zero());
 
     PoolCalculation {
         initial,
@@ -119,142 +98,216 @@ pub fn calculate_pool_vesting(
     }
 }
 
-async fn build_multicall(
-    contract: &ERC20<impl Middleware + 'static>,
-    excluded_addresses: &[Address],
-    pool_addresses: &[Address],
-) -> Multicall<impl Middleware + 'static> {
-    let multicall_addr: Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
-        .parse()
-        .expect("Invalid multicall address");
-    let mut multicall = Multicall::new(contract.client().clone(), Some(multicall_addr))
-        .await
-        .expect("Multicall creation failed");
-
-    multicall.add_call(contract.total_supply(), false);
-    multicall.add_call(contract.balance_of(Address::zero()), false);
-
-    for addr in excluded_addresses {
-        multicall.add_call(contract.balance_of(*addr), false);
-    }
-
-    for addr in pool_addresses {
-        let pool = StakingPool::new(*addr, contract.client().clone());
-        multicall.add_call(pool.initial_self_stake_amount(), false);
-        multicall.add_call(pool.pool_creation(), false);
-        multicall.add_call(pool.blocks_per_day(), false);
-        multicall.add_call(pool.initial_lock_period(), false);
-        multicall.add_call(pool.vesting_duration(), false);
-        multicall.add_call(pool.ratio_precision(), false);
-    }
-
-    multicall
-}
-
-fn parse_multicall_results(
-    results: Vec<U256>,
-    excluded_len: usize,
-    pool_len: usize,
-) -> MulticallResults {
-    let mut iter = results.into_iter();
-
-    let total_supply = iter.next().expect("Missing total supply");
-    let burn_balance = iter.next().expect("Missing burn balance");
-
-    let excluded_balances: Vec<U256> = (0..excluded_len)
-        .map(|_| iter.next().expect("Missing excluded balance"))
-        .collect();
-
-    let pool_data: Vec<PoolData> = (0..pool_len)
-        .map(|_| PoolData {
-            initial: iter.next().expect("Missing initial"),
-            pool_creation: iter.next().expect("Missing pool creation"),
-            blocks_per_day: iter.next().expect("Missing blocks per day"),
-            lock_days: iter.next().expect("Missing lock days"),
-            vesting_days: iter.next().expect("Missing vesting days"),
-            ratio_precision: iter.next().expect("Missing ratio precision"),
-        })
-        .collect();
-
-    MulticallResults {
-        total_supply,
-        burn_balance,
-        excluded_balances,
-        pool_data,
-    }
-}
-
 pub async fn get_total_supply(
-    contract: &ERC20<impl Middleware + 'static>,
+    matchain_contract: &ERC20<impl Middleware + Clone + 'static>,
+    bsc_contract: &ERC20<impl Middleware + Clone + 'static>,
     decimals: u8,
 ) -> Result<String, anyhow::Error> {
-    let multicall = build_multicall(contract, &[], &[]).await;
-    let results: Vec<U256> = multicall.call_array().await?;
-    let parsed = parse_multicall_results(results, 0, 0);
+    let mut matchain_multicall = Multicall::new(matchain_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
+    matchain_multicall.add_call(matchain_contract.total_supply(), false);
+    matchain_multicall.add_call(matchain_contract.balance_of(Address::zero()), false);
+    let matchain_results: Vec<U256> = matchain_multicall.call_array().await?;
 
-    // Safe subtraction to prevent underflow
-    let value = if parsed.burn_balance < parsed.total_supply {
-        parsed.total_supply - parsed.burn_balance
-    } else {
-        U256::zero()
-    };
+    let mut bsc_multicall = Multicall::new(bsc_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
+    bsc_multicall.add_call(bsc_contract.total_supply(), false);
+    bsc_multicall.add_call(bsc_contract.balance_of(Address::zero()), false);
+    let bsc_results: Vec<U256> = bsc_multicall.call_array().await?;
+
+    let total_m = matchain_results[0];
+    let burn_m = matchain_results[1];
+    let total_b = bsc_results[0];
+    let burn_b = bsc_results[1];
+
+    let value = (total_m.checked_sub(burn_m).unwrap_or(U256::zero())) + (total_b.checked_sub(burn_b).unwrap_or(U256::zero()));
+    eprintln!("Total Supply: Matchain = {}, BSC = {}, Burned = {}, Value = {}", total_m, total_b, burn_m + burn_b, value);
 
     Ok(utils::u256_to_human(value, decimals))
 }
 
 pub async fn get_circulating_supply(
-    contract: &ERC20<impl Middleware + 'static>,
+    matchain_contract: &ERC20<impl Middleware + Clone + 'static>,
+    bsc_contract: &ERC20<impl Middleware + Clone + 'static>,
     excluded_addresses: &[Address],
-    pool_addresses: &[Address],
+    pool_data: &[(Vec<(Address, String)>, U256, U256, U256, String, U256)],
+    onchain_pool_addresses: &[Address],
+    tge_timestamp: U256,
     decimals: u8,
 ) -> Result<String, anyhow::Error> {
-    let multicall = build_multicall(contract, excluded_addresses, pool_addresses).await;
-    let results: Vec<U256> = multicall.call_array().await?;
-    let parsed = parse_multicall_results(results, excluded_addresses.len(), pool_addresses.len());
+    let current_block = matchain_contract.client().get_block_number().await?;
+    let current_ts = matchain_contract.client().get_block(current_block).await?.map(|block| block.timestamp).unwrap_or(U256::zero());
+    eprintln!("Current Block: {}, Current TS: {}", current_block, current_ts);
 
-    let excluded_balance = parsed
-        .excluded_balances
+    let pool_addresses: Vec<Address> = pool_data
         .iter()
-        .fold(U256::zero(), |acc, &b| acc + b);
+        .flat_map(|(addrs, _, _, _, _, _)| addrs.iter().map(|(addr, _)| *addr))
+        .collect();
+    let unique_excluded_addresses: Vec<Address> = excluded_addresses
+        .iter()
+        .filter(|&addr| !pool_addresses.contains(addr))
+        .copied()
+        .collect();
 
-    let current_block = contract.client().get_block_number().await?;
+    let mut matchain_multicall = Multicall::new(matchain_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
+    matchain_multicall.add_call(matchain_contract.total_supply(), false);
+    matchain_multicall.add_call(matchain_contract.balance_of(Address::zero()), false);
 
-    let locked_balance = parsed.pool_data.iter().fold(U256::zero(), |acc, data| {
+    for &addr in &unique_excluded_addresses {
+        matchain_multicall.add_call(matchain_contract.balance_of(addr), false);
+    }
+
+    for (i, &addr) in onchain_pool_addresses.iter().enumerate() {
+        let pool = StakingPool::new(addr, matchain_contract.client().clone());
+        matchain_multicall.add_call(pool.initial_self_stake_amount(), false);
+        matchain_multicall.add_call(pool.initial_lock_period(), false);
+        matchain_multicall.add_call(pool.vesting_duration(), false);
+        matchain_multicall.add_call(pool.ratio_precision(), false);
+        eprintln!("Adding Pool call for address {}: {}", i, addr);
+    }
+
+    let matchain_results: Vec<U256> = matchain_multicall.call_array().await?;
+    eprintln!("Matchain Results (length={}): {:?}", matchain_results.len(), matchain_results);
+
+    let mut bsc_multicall = Multicall::new(bsc_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
+    bsc_multicall.add_call(bsc_contract.total_supply(), false);
+    bsc_multicall.add_call(bsc_contract.balance_of(Address::zero()), false);
+    let bsc_results: Vec<U256> = bsc_multicall.call_array().await?;
+    eprintln!("BSC Results (length={}): {:?}", bsc_results.len(), bsc_results);
+
+    let mut m_iter = matchain_results.into_iter();
+    let total_m = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing Matchain total supply"))?;
+    let burn_m = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing Matchain burn balance"))?;
+    let excluded_balances: Vec<U256> = (0..unique_excluded_addresses.len())
+        .map(|_| m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing excluded balance")).unwrap())
+        .collect();
+
+    let onchain_pool_data: Vec<(U256, U256, U256, U256)> = (0..onchain_pool_addresses.len())
+        .map(|i| {
+            let initial = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing initial stake for pool {}", i)).unwrap();
+            let lock_blocks = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing lock period for pool {}", i)).unwrap();
+            let vesting_blocks = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing vesting duration for pool {}", i)).unwrap();
+            let ratio_precision = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing ratio precision for pool {}", i)).unwrap();
+            let lock_days = lock_blocks / U256::from(172800u64); // 0.5s/block
+            let vesting_days = vesting_blocks / U256::from(172800u64);
+            // Bounds checking
+            if initial > U256::from(10u128.pow(27)) || lock_days > U256::from(2190) || vesting_days > U256::from(2190) || ratio_precision < U256::from(1000) || ratio_precision > U256::from(10u128.pow(16)) {
+                eprintln!("Invalid Pool data for address {}: initial={}, lock_days={}, vesting_days={}, ratio_precision={}", onchain_pool_addresses[i], initial, lock_days, vesting_days, ratio_precision);
+                (U256::zero(), U256::zero(), U256::zero(), U256::from(1_000_000))
+            } else {
+                (initial, lock_days, vesting_days, ratio_precision)
+            }
+        })
+        .collect();
+    eprintln!("Pool Data: {:?}", onchain_pool_data);
+
+    let mut b_iter = bsc_results.into_iter();
+    let total_b = b_iter.next().ok_or_else(|| anyhow::anyhow!("Missing BSC total supply"))?;
+    let burn_b = b_iter.next().ok_or_else(|| anyhow::anyhow!("Missing BSC burn balance"))?;
+
+    let total_supply = (total_m.checked_sub(burn_m).unwrap_or(U256::zero())) + (total_b.checked_sub(burn_b).unwrap_or(U256::zero()));
+    let excluded_balance = excluded_balances.iter().fold(U256::zero(), |acc, &b| acc + b);
+
+    let ratio_precision = U256::from(1_000_000u64);
+    let mut locked_balance = U256::zero();
+    let mut wallet_details = Vec::new();
+    let mut pool_details = Vec::new();
+
+    for (addrs, tge_percentage, cliff, vesting, vesting_type, balance_at_tge) in pool_data {
+        let initial = *balance_at_tge;
         let calc = calculate_pool_vesting(
-            data.initial,
-            data.pool_creation,
-            data.blocks_per_day,
-            data.lock_days,
-            data.vesting_days,
-            data.ratio_precision,
-            current_block,
+            initial,
+            *tge_percentage,
+            *cliff,
+            *vesting,
+            ratio_precision,
+            current_ts,
+            tge_timestamp,
+            vesting_type,
         );
-        acc + calc.locked_amount
-    });
-
-    // Safe arithmetic operations to prevent overflow
-    let mut value = parsed.total_supply;
-
-    // Subtract excluded balance safely
-    if excluded_balance < value {
-        value = value - excluded_balance;
-    } else {
-        value = U256::zero();
+        locked_balance = locked_balance.checked_add(calc.locked_amount).unwrap_or(locked_balance);
+        let unlocked_percent = (calc.unlocked_fraction * U256::from(100)) / ratio_precision;
+        let initial_tokens = utils::u256_to_human(initial, decimals);
+        let locked_tokens = utils::u256_to_human(calc.locked_amount, decimals);
+        wallet_details.push((addrs.clone(), initial_tokens, locked_tokens, unlocked_percent, tge_percentage, cliff, vesting, vesting_type.clone()));
     }
 
-    // Subtract locked balance safely
-    if locked_balance < value {
-        value = value - locked_balance;
-    } else {
-        value = U256::zero();
+    for (i, (initial, lock_days, vesting_days, ratio_precision)) in onchain_pool_data.iter().enumerate() {
+        let calc = calculate_pool_vesting(
+            *initial,
+            U256::zero(),
+            *lock_days,
+            *vesting_days,
+            *ratio_precision,
+            current_ts,
+            tge_timestamp,
+            "linear",
+        );
+        locked_balance = locked_balance.checked_add(calc.locked_amount).unwrap_or(locked_balance);
+        let unlocked_percent = (calc.unlocked_fraction * U256::from(100)) / *ratio_precision;
+        let initial_tokens = utils::u256_to_human(*initial, decimals);
+        let locked_tokens = utils::u256_to_human(calc.locked_amount, decimals);
+        pool_details.push((onchain_pool_addresses[i], initial_tokens, locked_tokens, unlocked_percent, *lock_days, *vesting_days));
     }
 
-    // Subtract burn balance safely
-    if parsed.burn_balance < value {
-        value = value - parsed.burn_balance;
-    } else {
-        value = U256::zero();
+    let total_supply_tokens = utils::u256_to_human(total_supply, decimals);
+    let excluded_balance_tokens = utils::u256_to_human(excluded_balance, decimals);
+    let locked_balance_tokens = utils::u256_to_human(locked_balance, decimals);
+    let circulating_supply_tokens = utils::u256_to_human(total_supply.checked_sub(locked_balance).unwrap_or(U256::zero()), decimals);
+
+    // Formatted terminal output
+    eprintln!("\n=============================================================");
+    eprintln!("           Token Supply Overview (Block {})", current_block);
+    eprintln!("=============================================================");
+    eprintln!("Total Supply       : {} tokens", total_supply_tokens);
+    eprintln!("Excluded Balance   : {} tokens", excluded_balance_tokens);
+    eprintln!("Locked Balance     : {} tokens", locked_balance_tokens);
+    eprintln!("Circulating Supply : {} tokens", circulating_supply_tokens);
+    eprintln!("\nCalculation Breakdown:");
+    eprintln!("- Total Supply = Matchain Total Supply + BSC Total Supply - Burned Tokens");
+    eprintln!("- Circulating Supply = Total Supply - Locked Balance");
+    eprintln!("- Locked Balance = Sum of locked tokens from wallets and pools");
+    eprintln!("\nWallet Vesting Details:");
+    eprintln!("{:-<60}", "");
+    for (addrs, initial, locked, unlocked_percent, tge_percentage, cliff, vesting, vesting_type) in wallet_details {
+        let addrs_str = addrs.iter().map(|(addr, chain)| format!("{} ({})", addr, chain)).collect::<Vec<_>>().join(", ");
+        eprintln!(
+            "Addresses        : {}\nInitial Balance  : {} tokens\nLocked           : {} tokens\nUnlocked         : {}%\nSchedule         : TGE = {}%, Cliff = {} days, Vesting = {} days, Type = {}\n{:-<60}",
+            addrs_str, initial, locked, unlocked_percent, tge_percentage, cliff, vesting, vesting_type, ""
+        );
+    }
+    eprintln!("\nPool Vesting Details:");
+    eprintln!("{:-<60}", "");
+    for (addr, initial, locked, unlocked_percent, lock_days, vesting_days) in pool_details {
+        eprintln!(
+            "Address          : {}\nInitial Balance  : {} tokens\nLocked           : {} tokens\nUnlocked         : {}%\nSchedule         : Lock = {} days, Vesting = {} days\n{:-<60}",
+            addr, initial, locked, unlocked_percent, lock_days, vesting_days, ""
+        );
     }
 
-    Ok(utils::u256_to_human(value, decimals))
+    // Pie chart
+    let total_supply_f64 = total_supply_tokens.parse::<f64>().unwrap_or(0.0);
+    let locked_f64 = locked_balance_tokens.parse::<f64>().unwrap_or(0.0);
+    let circulating_f64 = circulating_supply_tokens.parse::<f64>().unwrap_or(0.0);
+    let max_value = total_supply_f64;
+    let locked_percent = if max_value > 0.0 { (locked_f64 / max_value) * 100.0 } else { 0.0 };
+    let circulating_percent = if max_value > 0.0 { (circulating_f64 / max_value) * 100.0 } else { 0.0 };
+    let max_bar_length = 50;
+    let locked_bar = ((locked_percent / 100.0) * max_bar_length as f64) as usize;
+    let circulating_bar = ((circulating_percent / 100.0) * max_bar_length as f64) as usize;
+
+    eprintln!("\nSupply Distribution Pie Chart:");
+    eprintln!(
+        "Locked ({:.1}%): [{}]{:.2}M",
+        locked_percent,
+        "█".repeat(locked_bar),
+        locked_f64 / 1e6
+    );
+    eprintln!(
+        "Circulating ({:.1}%): [{}]{:.2}M",
+        circulating_percent,
+        "█".repeat(circulating_bar),
+        circulating_f64 / 1e6
+    );
+    eprintln!("=====================================\n");
+
+    Ok(circulating_supply_tokens)
 }
