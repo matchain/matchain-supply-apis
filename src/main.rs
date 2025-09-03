@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 struct AppState {
     matchain_contract: Arc<ERC20<Provider<Http>>>,
     bsc_contract: Arc<ERC20<Provider<Http>>>,
-    excluded_addresses: Vec<Address>,
+    excluded_addresses: Vec<(Address, String)>,
     pool_data: Vec<(Vec<(Address, String)>, U256, U256, U256, String, U256)>,
     onchain_pool_addresses: Vec<Address>,
     tge_timestamp: U256,

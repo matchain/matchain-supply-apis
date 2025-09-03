@@ -2,44 +2,6 @@
     {
         "addresses": [
             {
-                "address": "0xC6Ad1EBe2B59629627baf4E39eA3e690Ee88a064",
-                "chain": "Matchain"
-            },
-            {
-                "address": "0x2ef78421677f45287c3bc4Ee64b02405b33fcc0e",
-                "chain": "BSC"
-            },
-            {
-                "address": "0x781B38E5aD565354591EC60cC0e843741908e208",
-                "chain": "BSC"
-            },
-            {
-                "address": "0x5eB4A369E7a446F6f24E8f3E8f27eEC35197618f",
-                "chain": "BSC"
-            }
-        ],
-        "tge_percentage": 100,
-        "cliff": 0,
-        "vesting": 0,
-        "balance_at_tge": 6040000,
-        "vesting_type": "linear"
-    },
-    {
-        "addresses": [
-            {
-                "address": "0x792CBE44E6dDae2Bb803aF32fB9c8bfCc4b4CDCa",
-                "chain": "Matchain"
-            }
-        ],
-        "tge_percentage": 100,
-        "cliff": 0,
-        "vesting": 0,
-        "balance_at_tge": 3500000,
-        "vesting_type": "linear"
-    },
-    {
-        "addresses": [
-            {
                 "address": "0xD187C1ab1A673c96962a82ECe6Ed8F1b6A1FFb8E",
                 "chain": "Matchain"
             },

@@ -23,13 +23,10 @@ struct AddressInfo {
     chain: String,
 }
 
-pub fn read_excluded_addresses() -> Vec<Address> {
-    let content = include_str!("../config/excluded_address_list.json");
-    let entries: Vec<PoolEntry> = serde_json::from_str(&content).expect("Failed to parse excluded address list");
-    entries
-        .into_iter()
-        .flat_map(|entry| entry.addresses.into_iter().map(|info| info.address))
-        .collect()
+pub fn read_excluded_addresses() -> Vec<(Address, String)> {
+    let content = include_str!("../config/excluded_addresses.json");
+    let entries: Vec<AddressInfo> = serde_json::from_str(&content).expect("Failed to parse excluded addresses");
+    entries.into_iter().map(|info| (info.address, info.chain)).collect()
 }
 
 pub fn read_pool_data() -> Vec<(Vec<(Address, String)>, U256, U256, U256, String, U256)> {
@@ -54,13 +51,17 @@ pub fn read_onchain_pool_addresses() -> Vec<Address> {
 }
 
 pub fn validate_address_lists() -> Result<(), String> {
-    let excluded_addresses = read_excluded_addresses();
+    let excluded_addresses = read_excluded_addresses().into_iter().map(|(addr, _)| addr).collect::<Vec<_>>();
+    let pool_data_addresses = read_pool_data()
+        .into_iter()
+        .flat_map(|(addrs, _, _, _, _, _)| addrs.into_iter().map(|(addr, _)| addr))
+        .collect::<Vec<_>>();
     let onchain_pool_addresses = read_onchain_pool_addresses();
 
     let mut duplicates = Vec::new();
 
     for pool_addr in &onchain_pool_addresses {
-        if excluded_addresses.contains(pool_addr) {
+        if excluded_addresses.contains(pool_addr) || pool_data_addresses.contains(pool_addr) {
             duplicates.push(format!("0x{:x}", pool_addr));
         }
     }
@@ -68,13 +69,12 @@ pub fn validate_address_lists() -> Result<(), String> {
     if !duplicates.is_empty() {
         return Err(format!(
             "\n❌ CONFIGURATION ERROR ❌\n\n\
-            🚫 Pool addresses found in excluded addresses list!\n\n\
+            🚫 Pool addresses found in excluded addresses or vesting wallets!\n\n\
             This would cause double counting in supply calculations.\n\n\
             🔧 TO FIX:\n\
-            Remove these addresses from 'config/excluded_address_list.json':\n\n\
+            Remove these addresses from 'config/excluded_addresses.json' or 'config/excluded_address_list.json':\n\n\
             {}\n\n\
-            💡 TIP: Pool addresses should only be in 'config/pool_address_list.json' or vesting data, \
-            not in the excluded list since they are handled separately in the vesting calculations.\n",
+            💡 TIP: Pool addresses should only be in 'config/pool_address_list.json'.\n",
             duplicates.join("\n")
         ));
     }

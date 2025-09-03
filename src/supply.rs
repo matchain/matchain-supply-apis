@@ -127,7 +127,7 @@ pub async fn get_total_supply(
 pub async fn get_circulating_supply(
     matchain_contract: &ERC20<impl Middleware + Clone + 'static>,
     bsc_contract: &ERC20<impl Middleware + Clone + 'static>,
-    excluded_addresses: &[Address],
+    excluded_addresses: &[(Address, String)],
     pool_data: &[(Vec<(Address, String)>, U256, U256, U256, String, U256)],
     onchain_pool_addresses: &[Address],
     tge_timestamp: U256,
@@ -141,18 +141,15 @@ pub async fn get_circulating_supply(
         .iter()
         .flat_map(|(addrs, _, _, _, _, _)| addrs.iter().map(|(addr, _)| *addr))
         .collect();
-    let unique_excluded_addresses: Vec<Address> = excluded_addresses
-        .iter()
-        .filter(|&addr| !pool_addresses.contains(addr))
-        .copied()
-        .collect();
 
     let mut matchain_multicall = Multicall::new(matchain_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
     matchain_multicall.add_call(matchain_contract.total_supply(), false);
     matchain_multicall.add_call(matchain_contract.balance_of(Address::zero()), false);
 
-    for &addr in &unique_excluded_addresses {
-        matchain_multicall.add_call(matchain_contract.balance_of(addr), false);
+    for (addr, chain) in excluded_addresses {
+        if chain == "Matchain" {
+            matchain_multicall.add_call(matchain_contract.balance_of(*addr), false);
+        }
     }
 
     for (i, &addr) in onchain_pool_addresses.iter().enumerate() {
@@ -170,13 +167,22 @@ pub async fn get_circulating_supply(
     let mut bsc_multicall = Multicall::new(bsc_contract.client(), Some("0xcA11bde05977b3631167028862bE2a173976CA11".parse::<Address>().unwrap())).await?;
     bsc_multicall.add_call(bsc_contract.total_supply(), false);
     bsc_multicall.add_call(bsc_contract.balance_of(Address::zero()), false);
+
+    for (addr, chain) in excluded_addresses {
+        if chain == "BSC" {
+            bsc_multicall.add_call(bsc_contract.balance_of(*addr), false);
+        }
+    }
+
     let bsc_results: Vec<U256> = bsc_multicall.call_array().await?;
     eprintln!("BSC Results (length={}): {:?}", bsc_results.len(), bsc_results);
 
     let mut m_iter = matchain_results.into_iter();
     let total_m = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing Matchain total supply"))?;
     let burn_m = m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing Matchain burn balance"))?;
-    let excluded_balances: Vec<U256> = (0..unique_excluded_addresses.len())
+    let matchain_excluded_balances: Vec<U256> = excluded_addresses
+        .iter()
+        .filter(|(_, chain)| chain == "Matchain")
         .map(|_| m_iter.next().ok_or_else(|| anyhow::anyhow!("Missing excluded balance")).unwrap())
         .collect();
 
@@ -202,14 +208,20 @@ pub async fn get_circulating_supply(
     let mut b_iter = bsc_results.into_iter();
     let total_b = b_iter.next().ok_or_else(|| anyhow::anyhow!("Missing BSC total supply"))?;
     let burn_b = b_iter.next().ok_or_else(|| anyhow::anyhow!("Missing BSC burn balance"))?;
+    let bsc_excluded_balances: Vec<U256> = excluded_addresses
+        .iter()
+        .filter(|(_, chain)| chain == "BSC")
+        .map(|_| b_iter.next().ok_or_else(|| anyhow::anyhow!("Missing excluded balance")).unwrap())
+        .collect();
 
     let total_supply = (total_m.checked_sub(burn_m).unwrap_or(U256::zero())) + (total_b.checked_sub(burn_b).unwrap_or(U256::zero()));
-    let excluded_balance = excluded_balances.iter().fold(U256::zero(), |acc, &b| acc + b);
+    let excluded_balance = matchain_excluded_balances.iter().chain(bsc_excluded_balances.iter()).fold(U256::zero(), |acc, &b| acc + b);
 
     let ratio_precision = U256::from(1_000_000u64);
     let mut locked_balance = U256::zero();
     let mut wallet_details = Vec::new();
     let mut pool_details = Vec::new();
+    let mut excluded_details = Vec::new();
 
     for (addrs, tge_percentage, cliff, vesting, vesting_type, balance_at_tge) in pool_data {
         let initial = *balance_at_tge;
@@ -248,10 +260,21 @@ pub async fn get_circulating_supply(
         pool_details.push((onchain_pool_addresses[i], initial_tokens, locked_tokens, unlocked_percent, *lock_days, *vesting_days));
     }
 
+    for (i, (addr, chain)) in excluded_addresses.iter().enumerate() {
+        let balance = if chain == "Matchain" {
+            matchain_excluded_balances.get(i).copied().unwrap_or(U256::zero())
+        } else {
+            bsc_excluded_balances.get(i - matchain_excluded_balances.len()).copied().unwrap_or(U256::zero())
+        };
+        let balance_tokens = utils::u256_to_human(balance, decimals);
+        excluded_details.push((addr, chain, balance_tokens));
+    }
+
     let total_supply_tokens = utils::u256_to_human(total_supply, decimals);
     let excluded_balance_tokens = utils::u256_to_human(excluded_balance, decimals);
     let locked_balance_tokens = utils::u256_to_human(locked_balance, decimals);
-    let circulating_supply_tokens = utils::u256_to_human(total_supply.checked_sub(locked_balance).unwrap_or(U256::zero()), decimals);
+    let circulating_supply = total_supply.checked_sub(excluded_balance).unwrap_or(U256::zero()).checked_sub(locked_balance).unwrap_or(U256::zero());
+    let circulating_supply_tokens = utils::u256_to_human(circulating_supply, decimals);
 
     // Formatted terminal output
     eprintln!("\n=============================================================");
@@ -263,8 +286,14 @@ pub async fn get_circulating_supply(
     eprintln!("Circulating Supply : {} tokens", circulating_supply_tokens);
     eprintln!("\nCalculation Breakdown:");
     eprintln!("- Total Supply = Matchain Total Supply + BSC Total Supply - Burned Tokens");
-    eprintln!("- Circulating Supply = Total Supply - Locked Balance");
-    eprintln!("- Locked Balance = Sum of locked tokens from wallets and pools");
+    eprintln!("- Circulating Supply = Total Supply - Excluded Balance - Locked Balance");
+    eprintln!("- Excluded Balance = Sum of MAT balances from excluded addresses");
+    eprintln!("- Locked Balance = Sum of locked tokens from vesting wallets and pools");
+    eprintln!("\nExcluded Addresses:");
+    eprintln!("{:-<60}", "");
+    for (addr, chain, balance) in excluded_details {
+        eprintln!("Address : {}\nChain   : {}\nBalance : {} tokens\n{:-<60}", addr, chain, balance, "");
+    }
     eprintln!("\nWallet Vesting Details:");
     eprintln!("{:-<60}", "");
     for (addrs, initial, locked, unlocked_percent, tge_percentage, cliff, vesting, vesting_type) in wallet_details {
@@ -285,16 +314,25 @@ pub async fn get_circulating_supply(
 
     // Pie chart
     let total_supply_f64 = total_supply_tokens.parse::<f64>().unwrap_or(0.0);
+    let excluded_f64 = excluded_balance_tokens.parse::<f64>().unwrap_or(0.0);
     let locked_f64 = locked_balance_tokens.parse::<f64>().unwrap_or(0.0);
     let circulating_f64 = circulating_supply_tokens.parse::<f64>().unwrap_or(0.0);
     let max_value = total_supply_f64;
+    let excluded_percent = if max_value > 0.0 { (excluded_f64 / max_value) * 100.0 } else { 0.0 };
     let locked_percent = if max_value > 0.0 { (locked_f64 / max_value) * 100.0 } else { 0.0 };
     let circulating_percent = if max_value > 0.0 { (circulating_f64 / max_value) * 100.0 } else { 0.0 };
     let max_bar_length = 50;
+    let excluded_bar = ((excluded_percent / 100.0) * max_bar_length as f64) as usize;
     let locked_bar = ((locked_percent / 100.0) * max_bar_length as f64) as usize;
     let circulating_bar = ((circulating_percent / 100.0) * max_bar_length as f64) as usize;
 
     eprintln!("\nSupply Distribution Pie Chart:");
+    eprintln!(
+        "Excluded ({:.1}%): [{}]{:.2}M",
+        excluded_percent,
+        "█".repeat(excluded_bar),
+        excluded_f64 / 1e6
+    );
     eprintln!(
         "Locked ({:.1}%): [{}]{:.2}M",
         locked_percent,
