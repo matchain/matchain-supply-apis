@@ -1,7 +1,7 @@
 [
     {
         "address": "0xf9ff433f14f237ce6643257ca4cd5aec355eaee7",
-        "reserved": false
+        "reserved": true
     },
     {
         "address": "0x256b02b26c67029b2881ab5d493cf8e5068d5fcc",
@@ -13,7 +13,7 @@
     },
     {
         "address": "0xfa38f584f561642ff0d1ab67b5a175798668a047",
-        "reserved": false
+        "reserved": true
     },
     {
         "address": "0x443d8318224c59c31987ea310033d0dc47a10d88",
