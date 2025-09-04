@@ -15,7 +15,7 @@ struct AppState {
     bsc_contract: Arc<ERC20<Provider<Http>>>,
     excluded_addresses: Vec<(Address, String)>,
     pool_data: Vec<(Vec<(Address, String)>, U256, U256, U256, String, U256)>,
-    onchain_pool_addresses: Vec<Address>,
+    onchain_pool_addresses: Vec<(Address, bool)>,
     tge_timestamp: U256,
     decimals: u8,
 }
@@ -70,7 +70,7 @@ async fn main() -> AnyhowResult<()> {
 }
 
 async fn total_supply(State(state): State<Arc<AppState>>) -> String {
-    match supply::get_total_supply(&state.matchain_contract, state.decimals).await {
+    match supply::get_total_supply(&state.matchain_contract, &state.bsc_contract, state.decimals).await {
         Ok(value) => value,
         Err(e) => {
             eprintln!("Error calculating total supply: {:?}", e);
