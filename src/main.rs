@@ -70,7 +70,7 @@ async fn main() -> AnyhowResult<()> {
 }
 
 async fn total_supply(State(state): State<Arc<AppState>>) -> String {
-    match supply::get_total_supply(&state.matchain_contract, &state.bsc_contract, state.decimals).await {
+    match supply::get_total_supply(&state.matchain_contract, state.decimals).await {
         Ok(value) => value,
         Err(e) => {
             eprintln!("Error calculating total supply: {:?}", e);
@@ -82,7 +82,6 @@ async fn total_supply(State(state): State<Arc<AppState>>) -> String {
 async fn circulating_supply(State(state): State<Arc<AppState>>) -> String {
     match supply::get_circulating_supply(
         &state.matchain_contract,
-        &state.bsc_contract,
         &state.excluded_addresses,
         &state.pool_data,
         &state.onchain_pool_addresses,
